@@ -25,6 +25,8 @@ jobs:
 
   plan-apply:
     needs: validate
+    # Skips cleanly until the LZ_PIPELINE_ROLE_ARN repository variable is configured.
+    if: vars.LZ_PIPELINE_ROLE_ARN != ''
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 1
