@@ -1,0 +1,47 @@
+name: Landing Zone
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - name: Validate modules
+        run: for d in modules/*/; do (cd $d && terraform init -backend=false -input=false >/dev/null && terraform validate); done
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          soft_fail: true
+
+  plan-apply:
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        stack: [management, network, workloads-nonprod, workloads-prod]
+    environment: ${{ github.event_name == 'push' && matrix.stack || '' }}
+    defaults:
+      run:
+        working-directory: live/${{ matrix.stack }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.LZ_PIPELINE_ROLE_ARN }}
+          aws-region: us-east-1
+      - run: terraform init -input=false
+      - run: terraform plan -input=false -out=tfplan
+      - if: github.event_name == 'push'
+        run: terraform apply -input=false tfplan

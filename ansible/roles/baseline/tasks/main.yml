@@ -1,0 +1,57 @@
+- name: Install baseline packages
+  ansible.builtin.package:
+    name: [audit, chrony, amazon-cloudwatch-agent]
+    state: present
+
+- name: Harden SSH
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?{{ item.key }}\\s"
+    line: "{{ item.key }} {{ item.value }}"
+    validate: "sshd -t -f %s"
+  loop:
+    - { key: PermitRootLogin, value: "no" }
+    - { key: PasswordAuthentication, value: "no" }
+    - { key: X11Forwarding, value: "no" }
+    - { key: MaxAuthTries, value: "3" }
+    - { key: ClientAliveInterval, value: "300" }
+  notify: restart sshd
+
+- name: Audit rules for identity and privilege changes
+  ansible.builtin.copy:
+    dest: /etc/audit/rules.d/50-baseline.rules
+    mode: "0640"
+    content: |
+      -w /etc/passwd -p wa -k identity
+      -w /etc/group -p wa -k identity
+      -w /etc/sudoers -p wa -k privilege
+      -w /etc/sudoers.d/ -p wa -k privilege
+      -w /var/log/lastlog -p wa -k logins
+  notify: reload auditd
+
+- name: Enable time sync and auditd
+  ansible.builtin.service:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop: [chronyd, auditd]
+
+- name: Configure CloudWatch agent
+  ansible.builtin.copy:
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    mode: "0644"
+    content: "{{ cloudwatch_agent_config | to_nice_json }}"
+  vars:
+    cloudwatch_agent_config:
+      metrics:
+        namespace: Baseline/EC2
+        metrics_collected:
+          mem: { measurement: [mem_used_percent] }
+          disk: { measurement: [used_percent], resources: ["/"] }
+      logs:
+        logs_collected:
+          files:
+            collect_list:
+              - { file_path: /var/log/secure, log_group_name: "/ec2/secure", log_stream_name: "{instance_id}" }
+              - { file_path: /var/log/audit/audit.log, log_group_name: "/ec2/audit", log_stream_name: "{instance_id}" }
+  notify: restart cloudwatch agent
