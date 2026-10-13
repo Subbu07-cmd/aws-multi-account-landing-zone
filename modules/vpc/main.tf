@@ -1,7 +1,6 @@
-data "aws_availability_zones" "this" { state = "available" }
-
+# AZs are pinned explicitly (CKV_AWS_394) so the subnet layout never shifts when AWS adds a zone.
 locals {
-  azs = slice(data.aws_availability_zones.this.names, 0, 3)
+  azs = var.azs
 }
 
 resource "aws_vpc" "this" {

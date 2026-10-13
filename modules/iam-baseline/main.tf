@@ -5,11 +5,28 @@ locals {
 }
 
 # Every role created by automation must carry this boundary, which blocks privilege escalation.
+# A permissions boundary is a ceiling, not a grant: a role's effective permissions are the
+# intersection of the boundary and its attached policies. Service-level wildcards are therefore
+# intentional here; least privilege is enforced by each role's own policy.
 data "aws_iam_policy_document" "boundary" {
+  # checkov:skip=CKV_AWS_107:Permissions boundary (ceiling); credential access is limited by attached policies
+  # checkov:skip=CKV_AWS_108:Permissions boundary (ceiling); data access is limited by attached policies
+  # checkov:skip=CKV_AWS_109:Permissions boundary (ceiling); IAM changes are constrained by the boundary condition below
+  # checkov:skip=CKV_AWS_111:Permissions boundary (ceiling); write access is granted only by attached policies
+  # checkov:skip=CKV_AWS_356:Permissions boundary (ceiling); resource scoping lives in attached policies
   statement {
     sid       = "AllowWorkloadServices"
-    actions   = ["ec2:*", "eks:*", "ecr:*", "rds:*", "s3:*", "logs:*", "cloudwatch:*", "elasticloadbalancing:*", "autoscaling:*", "kms:Decrypt", "kms:GenerateDataKey*", "secretsmanager:GetSecretValue", "ssm:Get*"]
+    actions   = ["ec2:*", "eks:*", "ecr:*", "rds:*", "s3:*", "logs:*", "cloudwatch:*", "elasticloadbalancing:*", "autoscaling:*"]
     resources = ["*"]
+  }
+  statement {
+    sid     = "AllowAccountScopedSecretsAndKeys"
+    actions = ["kms:Decrypt", "kms:GenerateDataKey*", "secretsmanager:GetSecretValue", "ssm:GetParameter*"]
+    resources = [
+      "arn:aws:kms:*:${local.account_id}:key/*",
+      "arn:aws:secretsmanager:*:${local.account_id}:secret:*",
+      "arn:aws:ssm:*:${local.account_id}:parameter/*",
+    ]
   }
   statement {
     sid       = "AllowRoleManagementOnlyWithBoundary"

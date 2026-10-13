@@ -1,12 +1,111 @@
+data "aws_caller_identity" "current" {}
+
+locals {
+  mgmt       = var.is_management_account ? 1 : 0
+  account_id = data.aws_caller_identity.current.account_id
+}
+
+# Customer-managed key for the trail, its CloudWatch log group and its SNS topic.
+resource "aws_kms_key" "audit" {
+  count                   = local.mgmt
+  description             = "Organization audit trail"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "AccountAdministration"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${local.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "CloudTrailEncrypt"
+        Effect    = "Allow"
+        Principal = { Service = "cloudtrail.amazonaws.com" }
+        Action    = ["kms:GenerateDataKey*", "kms:DescribeKey", "kms:Decrypt"]
+        Resource  = "*"
+      },
+      {
+        Sid       = "CloudWatchLogsEncrypt"
+        Effect    = "Allow"
+        Principal = { Service = "logs.${var.region}.amazonaws.com" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+      },
+    ]
+  })
+}
+
+# Stream the trail into CloudWatch Logs for metric filters and alarms (CKV2_AWS_10)
+resource "aws_cloudwatch_log_group" "trail" {
+  count             = local.mgmt
+  name              = "/aws/cloudtrail/org-trail"
+  retention_in_days = 365
+  kms_key_id        = aws_kms_key.audit[0].arn
+}
+
+resource "aws_iam_role" "trail_to_cwl" {
+  count = local.mgmt
+  name  = "cloudtrail-to-cloudwatch"
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Principal = { Service = "cloudtrail.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+}
+
+resource "aws_iam_role_policy" "trail_to_cwl" {
+  count = local.mgmt
+  name  = "write-trail-logs"
+  role  = aws_iam_role.trail_to_cwl[0].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+      Resource = "${aws_cloudwatch_log_group.trail[0].arn}:*"
+    }]
+  })
+}
+
+# Notify on every log file delivery (CKV_AWS_252)
+resource "aws_sns_topic" "trail" {
+  count             = local.mgmt
+  name              = "org-trail-delivery"
+  kms_master_key_id = aws_kms_key.audit[0].id
+}
+
+resource "aws_sns_topic_policy" "trail" {
+  count = local.mgmt
+  arn   = aws_sns_topic.trail[0].arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "CloudTrailPublish"
+      Effect    = "Allow"
+      Principal = { Service = "cloudtrail.amazonaws.com" }
+      Action    = "sns:Publish"
+      Resource  = aws_sns_topic.trail[0].arn
+    }]
+  })
+}
+
 resource "aws_cloudtrail" "org" {
-  count                         = var.is_management_account ? 1 : 0
+  count                         = local.mgmt
   name                          = "org-trail"
   s3_bucket_name                = var.log_bucket_name
   is_organization_trail         = true
   is_multi_region_trail         = true
   include_global_service_events = true
   enable_log_file_validation    = true
-  kms_key_id                    = var.kms_key_arn
+  kms_key_id                    = coalesce(var.kms_key_arn, aws_kms_key.audit[0].arn)
+  cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.trail[0].arn}:*"
+  cloud_watch_logs_role_arn     = aws_iam_role.trail_to_cwl[0].arn
+  sns_topic_name                = aws_sns_topic.trail[0].name
+
+  depends_on = [aws_iam_role_policy.trail_to_cwl, aws_sns_topic_policy.trail]
 }
 
 resource "aws_iam_role" "config" {
@@ -68,6 +167,13 @@ resource "aws_config_config_rule" "managed" {
 resource "aws_guardduty_detector" "this" {
   enable                       = true
   finding_publishing_frequency = "FIFTEEN_MINUTES"
+}
+
+# Org-wide GuardDuty (CKV2_AWS_3): new member accounts are enrolled automatically.
+resource "aws_guardduty_organization_configuration" "this" {
+  count                            = local.mgmt
+  detector_id                      = aws_guardduty_detector.this.id
+  auto_enable_organization_members = "ALL"
 }
 
 resource "aws_securityhub_account" "this" {}
